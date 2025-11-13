@@ -1,0 +1,667 @@
+Big Data & AI Lab Exercises – Full Solution (Complete Answers)
+===============================================================
+This file contains full answers, runnable code, configuration files, shell commands,
+and short inline explanations for each of the 10 requested tasks.
+
+Contents
+--------
+1. Simple RPC mechanism (Python + Java)
+2. Hadoop pseudo-distributed mode (core-site.xml, hdfs-site.xml, steps)
+3. HDFS operations and WordCount MapReduce (Hadoop Streaming Python)
+4. Pig Latin scripts (student marks, sales data)
+5. Pig: analyze web log data (most frequently visited pages)
+6. Hive database and table example + HiveQL queries
+7. Spark DataFrame (CSV/JSON) exploratory queries (PySpark)
+8. Movie recommendation using Spark MLlib ALS (PySpark)
+9. Redis leaderboard (sorted sets) examples (CLI + Python)
+10. MongoDB queries (MQL) – filtering, projection, aggregation
+
+-------------------------
+1) SIMPLE RPC MECHANISM
+-------------------------
+Python — minimal JSON-over-TCP RPC (server + client)
+
+File: rpc_server.py
+-------------------
+#!/usr/bin/env python3
+# rpc_server.py
+# Minimal synchronous JSON-over-TCP RPC server.
+# Accepts a single JSON request per TCP connection:
+# { "method": "name", "params": [ ... ] }
+# Responds with: { "result": ..., "error": ... }
+
+import socket
+import json
+import threading
+
+HOST = '0.0.0.0'
+PORT = 5000
+
+# Example methods exposed
+def add(a, b):
+    return a + b
+
+def mul(a, b):
+    return a * b
+
+def echo(x):
+    return x
+
+METHODS = {
+    'add': add,
+    'mul': mul,
+    'echo': echo
+}
+
+def handle(conn, addr):
+    try:
+        data = b''
+        # Read until EOF (client closes connection):
+        while True:
+            part = conn.recv(4096)
+            if not part:
+                break
+            data += part
+            # naive: break if we think message complete (not robust)
+            if len(part) < 4096:
+                break
+        if not data:
+            return
+        text = data.decode('utf-8')
+        req = json.loads(text)
+        method = req.get('method')
+        params = req.get('params', [])
+        if method not in METHODS:
+            resp = {'result': None, 'error': f'Unknown method {method}'}
+        else:
+            try:
+                result = METHODS[method](*params)
+                resp = {'result': result, 'error': None}
+            except Exception as e:
+                resp = {'result': None, 'error': str(e)}
+        conn.sendall(json.dumps(resp).encode('utf-8'))
+    except Exception as e:
+        # In production, log properly
+        print("Handler error:", e)
+    finally:
+        conn.close()
+
+def main():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((HOST, PORT))
+    sock.listen(8)
+    print(f"RPC server listening on {HOST}:{PORT}")
+    try:
+        while True:
+            conn, addr = sock.accept()
+            t = threading.Thread(target=handle, args=(conn, addr), daemon=True)
+            t.start()
+    except KeyboardInterrupt:
+        print("Server shutting down")
+    finally:
+        sock.close()
+
+if __name__ == '__main__':
+    main()
+
+File: rpc_client.py
+-------------------
+#!/usr/bin/env python3
+# rpc_client.py
+import socket
+import json
+
+HOST = '127.0.0.1'
+PORT = 5000
+
+def call(method, params, host=HOST, port=PORT):
+    req = json.dumps({'method': method, 'params': params})
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.connect((host, port))
+    s.sendall(req.encode('utf-8'))
+    # read response
+    data = b''
+    while True:
+        part = s.recv(4096)
+        if not part:
+            break
+        data += part
+    s.close()
+    return json.loads(data.decode('utf-8'))
+
+if __name__ == '__main__':
+    print(call('add', [10, 20]))   # expected {'result':30, 'error':None}
+    print(call('mul', [3, 7]))     # expected {'result':21, 'error':None}
+    print(call('echo', ['hello'])) # expected {'result':'hello', 'error':None}
+    print(call('sub', [1, 2]))     # unknown method; shows error
+
+Notes:
+- This is intentionally simple for learning. Production systems need framing, authentication, TLS, timeouts, and better message framing.
+- Alternatives: gRPC, Thrift, HTTP+JSON, Java RMI.
+
+Java — simple socket RPC using org.json (or replace with Gson/Jackson)
+--------------------------------------------------------------------
+File: RpcServer.java
+--------------------
+// RpcServer.java
+// Minimal JSON-over-sockets RPC server. Requires a JSON library like org.json or similar.
+// Compile with: javac -cp .:json.jar RpcServer.java
+// Run with: java -cp .:json.jar RpcServer
+
+import java.io.*;
+import java.net.*;
+import org.json.JSONObject;
+import org.json.JSONArray;
+
+public class RpcServer {
+
+    public static int add(int a, int b){ return a + b; }
+    public static int mul(int a, int b){ return a * b; }
+
+    public static void handle(Socket s) {
+        try {
+            InputStream inS = s.getInputStream();
+            BufferedReader in = new BufferedReader(new InputStreamReader(inS, "UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            // read until EOF
+            while ((line = in.readLine()) != null) {
+                sb.append(line);
+            }
+            if (sb.length() == 0) {
+                s.close();
+                return;
+            }
+            JSONObject req = new JSONObject(sb.toString());
+            String method = req.getString("method");
+            JSONArray params = req.has("params") ? req.getJSONArray("params") : new JSONArray();
+            JSONObject resp = new JSONObject();
+            try {
+                if ("add".equals(method)) {
+                    int a = params.getInt(0), b = params.getInt(1);
+                    resp.put("result", add(a, b));
+                    resp.put("error", JSONObject.NULL);
+                } else if ("mul".equals(method)) {
+                    int a = params.getInt(0), b = params.getInt(1);
+                    resp.put("result", mul(a, b));
+                    resp.put("error", JSONObject.NULL);
+                } else {
+                    resp.put("result", JSONObject.NULL);
+                    resp.put("error", "Unknown method: " + method);
+                }
+            } catch (Exception e) {
+                resp.put("result", JSONObject.NULL);
+                resp.put("error", e.getMessage());
+            }
+            BufferedWriter out = new BufferedWriter(new OutputStreamWriter(s.getOutputStream(), "UTF-8"));
+            out.write(resp.toString());
+            out.flush();
+            s.close();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        ServerSocket ss = new ServerSocket(5000);
+        System.out.println("Java RPC server listening on 5000");
+        while (true) {
+            Socket s = ss.accept();
+            new Thread(() -> handle(s)).start();
+        }
+    }
+}
+
+File: RpcClient.java
+--------------------
+// RpcClient.java
+// Compile with: javac -cp .:json.jar RpcClient.java
+// Run with: java -cp .:json.jar RpcClient
+
+import java.io.*;
+import java.net.*;
+import org.json.JSONObject;
+import org.json.JSONArray;
+
+public class RpcClient {
+    public static JSONObject call(String host, int port, String method, JSONArray params) throws Exception {
+        Socket s = new Socket(host, port);
+        BufferedWriter out = new BufferedWriter(new OutputStreamWriter(s.getOutputStream(), "UTF-8"));
+        BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), "UTF-8"));
+        JSONObject req = new JSONObject();
+        req.put("method", method);
+        req.put("params", params);
+        out.write(req.toString());
+        out.flush();
+        // read response until EOF
+        StringBuilder sb = new StringBuilder();
+        String line;
+        while ((line = in.readLine()) != null) {
+            sb.append(line);
+        }
+        s.close();
+        return new JSONObject(sb.toString());
+    }
+
+    public static void main(String[] args) throws Exception {
+        JSONArray p = new JSONArray();
+        p.put(4); p.put(5);
+        JSONObject res = call("127.0.0.1", 5000, "add", p);
+        System.out.println(res.toString());
+    }
+}
+
+-------------------------
+2) HADOOP PSEUDO-DISTRIBUTED MODE
+-------------------------
+Place these files in $HADOOP_HOME/etc/hadoop/
+
+core-site.xml
+-------------
+<configuration>
+  <property>
+    <name>fs.defaultFS</name>
+    <value>hdfs://localhost:9000</value>
+  </property>
+  <property>
+    <name>hadoop.tmp.dir</name>
+    <value>/usr/local/hadoop/tmp</value>
+  </property>
+</configuration>
+
+hdfs-site.xml
+-------------
+<configuration>
+  <property>
+    <name>dfs.replication</name>
+    <value>1</value>
+  </property>
+
+  <property>
+    <name>dfs.namenode.name.dir</name>
+    <value>file:/usr/local/hadoop/data/namenode</value>
+  </property>
+
+  <property>
+    <name>dfs.datanode.data.dir</name>
+    <value>file:/usr/local/hadoop/data/datanode</value>
+  </property>
+</configuration>
+
+Important steps (shell examples)
+-------------------------------
+sudo mkdir -p /usr/local/hadoop/tmp
+sudo mkdir -p /usr/local/hadoop/data/namenode
+sudo mkdir -p /usr/local/hadoop/data/datanode
+sudo chown -R $(whoami):$(whoami) /usr/local/hadoop
+
+# set JAVA_HOME in hadoop env (edit $HADOOP_HOME/etc/hadoop/hadoop-env.sh)
+# export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+
+# format namenode (only once)
+$HADOOP_HOME/bin/hdfs namenode -format
+
+# start HDFS (pseudo-distributed)
+$HADOOP_HOME/sbin/start-dfs.sh
+
+# verify processes
+jps
+# you should see NameNode, DataNode, SecondaryNameNode, maybe ResourceManager and NodeManager
+
+Checks:
+- Ensure Java version matches Hadoop requirements.
+- Use dfs.replication=1 for pseudo-distributed.
+
+-------------------------
+3) HDFS OPERATIONS & WORDCOUNT (Hadoop Streaming with Python)
+-------------------------
+Common HDFS commands (examples)
+--------------------------------
+hdfs dfs -mkdir -p /user/youruser/input
+hdfs dfs -put localfile.txt /user/youruser/input
+hdfs dfs -copyFromLocal localfile.txt /user/youruser/input
+hdfs dfs -ls /user/youruser/input
+hdfs dfs -cat /user/youruser/input/localfile.txt
+hdfs dfs -get /user/youruser/output/part-00000 ./local_output.txt
+
+WordCount using Hadoop Streaming (Python mapper & reducer)
+---------------------------------------------------------
+File: mapper.py
+#!/usr/bin/env python3
+import sys
+for line in sys.stdin:
+    # simple tokenization; production use better tokenization
+    for word in line.strip().split():
+        word = word.lower()
+        if word:
+            print(f"{word}	1")
+
+File: reducer.py
+#!/usr/bin/env python3
+import sys
+
+current_word = None
+current_sum = 0
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        word, val = line.split("	", 1)
+        val = int(val)
+    except ValueError:
+        continue
+    if current_word == word:
+        current_sum += val
+    else:
+        if current_word is not None:
+            print(f"{current_word}	{current_sum}")
+        current_word = word
+        current_sum = val
+
+if current_word is not None:
+    print(f"{current_word}	{current_sum}")
+
+Make scripts executable:
+-----------------------
+chmod +x mapper.py reducer.py
+
+Run streaming job:
+------------------
+hdfs dfs -mkdir -p /user/you/wordcount/input
+hdfs dfs -put sample.txt /user/you/wordcount/input/
+
+hadoop jar $HADOOP_HOME/share/hadoop/tools/lib/hadoop-streaming-*.jar   -files mapper.py,reducer.py   -mapper mapper.py -reducer reducer.py   -input /user/you/wordcount/input/* -output /user/you/wordcount/output
+
+After job:
+----------
+hdfs dfs -ls /user/you/wordcount/output
+hdfs dfs -cat /user/you/wordcount/output/part-00000 | sort -k2 -n -r | head
+
+Notes:
+- This is the canonical "wordcount". For large scale, ensure proper sorting and combiners.
+
+If you want Java MapReduce instead, I can provide Mapper, Reducer, and Driver Java classes.
+
+-------------------------
+4) PIG LATIN SCRIPTS
+-------------------------
+Assume Pig is installed and configured to talk to HDFS.
+
+Example A: Student marks CSV (id,name,subject,marks)
+File: student_marks.pig
+students = LOAD '/user/you/data/students.csv' USING PigStorage(',') 
+           AS (id:int, name:chararray, subject:chararray, marks:int);
+
+-- filter students with marks >= 80
+high = FILTER students BY marks >= 80;
+
+-- select fields and add a grade field (simple conditional)
+high2 = FOREACH high GENERATE id, name, subject, marks, (marks >= 90 ? 'A' : 'B') AS grade;
+
+-- compute average marks per student (group by name)
+grp = GROUP students BY name;
+avgMarks = FOREACH grp GENERATE group AS name, AVG(students.marks) AS avg_marks;
+
+-- order by avg descending and limit to top 10
+sorted = ORDER avgMarks BY avg_marks DESC;
+top10 = LIMIT sorted 10;
+
+DUMP top10;
+
+Example B: Sales data CSV (order_id,product,amount,region,ts)
+File: sales_summary.pig
+sales = LOAD '/user/you/data/sales.csv' USING PigStorage(',') 
+        AS (order_id:int, product:chararray, amount:double, region:chararray, ts:chararray);
+
+-- filter region and amount
+filt = FILTER sales BY region == 'APAC' AND amount > 100;
+
+-- group by product and compute total and count
+g = GROUP filt BY product;
+sales_summary = FOREACH g GENERATE group AS product, SUM(filt.amount) AS total_amount, COUNT(filt) AS orders;
+
+ordered = ORDER sales_summary BY total_amount DESC;
+top = LIMIT ordered 20;
+DUMP top;
+
+Notes:
+- Use PigStorage or CSVExcelStorage if CSV contains quoted fields.
+- For bigger ETL, use UDFs.
+
+-------------------------
+5) PIG: ANALYZE WEB LOG DATA (Most frequently visited pages)
+-------------------------
+Assume Apache access log format: ip - - [date] "GET /path HTTP/1.1" status bytes
+
+File: weblogs_top_pages.pig
+logs = LOAD '/user/you/logs/access.log' AS (line:chararray);
+
+-- Use REGEX_EXTRACT_ALL to extract the request path.
+-- The pattern below captures the request part "GET /path HTTP/1.1"
+requests = FOREACH logs GENERATE FLATTEN(REGEX_EXTRACT_ALL(line, '"(GET|POST|PUT|DELETE)\s+([^\s]+)')) AS (method, path);
+
+-- Now 'path' is the requested path; filter out nulls
+paths = FILTER requests BY path IS NOT NULL AND path != '';
+
+-- group and count
+grp = GROUP paths BY path;
+counts = FOREACH grp GENERATE group AS path, COUNT(paths) AS cnt;
+
+-- order by count desc and get top 20
+ordered = ORDER counts BY cnt DESC;
+top20 = LIMIT ordered 20;
+
+DUMP top20;
+
+-------------------------
+6) HIVE: DATABASE & TABLE + QUERIES
+-------------------------
+Start Hive CLI or Beeline. Example SQL statements:
+
+Create database and tables:
+CREATE DATABASE IF NOT EXISTS company;
+USE company;
+
+-- employees table (CSV)
+CREATE EXTERNAL TABLE IF NOT EXISTS employees (
+  emp_id INT,
+  name STRING,
+  dept STRING,
+  salary DOUBLE,
+  join_date STRING
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/hive/warehouse/employees/';
+
+-- departments table
+CREATE EXTERNAL TABLE IF NOT EXISTS departments (
+  dept STRING,
+  manager STRING
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/user/hive/warehouse/departments/';
+
+Sample queries:
+SELECT name, dept, salary FROM employees WHERE salary > 50000;
+
+SELECT e.name, e.dept, d.manager
+FROM employees e JOIN departments d
+ON e.dept = d.dept
+WHERE e.salary > 60000;
+
+SELECT dept, COUNT(*) AS cnt, AVG(salary) AS avg_sal
+FROM employees
+GROUP BY dept
+ORDER BY avg_sal DESC;
+
+Notes:
+- Use MSCK REPAIR TABLE or ALTER TABLE ... ADD PARTITION for partitions.
+
+-------------------------
+7) SPARK DATAFRAME (CSV/JSON) – PySpark
+-------------------------
+File: explore.py
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, avg, sum as _sum, count, desc
+
+spark = SparkSession.builder.appName("Explore").getOrCreate()
+
+# Read CSV with header and infer schema
+df = spark.read.option("header", True).option("inferSchema", True).csv("hdfs:///data/sales.csv")
+
+# show schema and first rows
+df.printSchema()
+df.show(5)
+
+# filter rows where amount > 100
+high_sales = df.filter(col('amount') > 100)
+print("High sales count:", high_sales.count())
+
+# groupBy and aggregate: total and average amount by product
+agg = df.groupBy('product').agg(
+    _sum('amount').alias('total_amount'),
+    avg('amount').alias('avg_amount'),
+    count('*').alias('orders')
+)
+agg.orderBy(desc('total_amount')).show(20)
+
+# SQL interface example
+df.createOrReplaceTempView("sales")
+spark.sql("""
+  SELECT product, SUM(amount) AS total, AVG(amount) AS avg_amount
+  FROM sales WHERE region = 'APAC'
+  GROUP BY product ORDER BY total DESC LIMIT 10
+""").show()
+
+spark.stop()
+
+JSON example:
+df_json = spark.read.json("hdfs:///data/events.json")
+df_json.printSchema()
+df_json.show(5)
+
+Notes:
+- Use spark-submit explore.py or run inside pyspark shell.
+- Avoid calling .count() on huge datasets where possible.
+
+-------------------------
+8) MOVIE RECOMMENDATION (ALS using Spark MLlib)
+-------------------------
+File: als_recommendation.py
+from pyspark.sql import SparkSession
+from pyspark.ml.recommendation import ALS
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.sql.functions import col
+
+spark = SparkSession.builder.appName("ALSExample").getOrCreate()
+
+# ratings.csv: userId,movieId,rating,timestamp (common format in MovieLens)
+ratings = spark.read.option("header", True).csv("hdfs:///data/ratings.csv")     .select(
+        col("userId").cast("int").alias("userId"),
+        col("movieId").cast("int").alias("movieId"),
+        col("rating").cast("float").alias("rating")
+    )
+
+(training, test) = ratings.randomSplit([0.8, 0.2], seed=42)
+
+als = ALS(
+    maxIter=10,
+    regParam=0.1,
+    rank=10,
+    userCol="userId",
+    itemCol="movieId",
+    ratingCol="rating",
+    coldStartStrategy="drop",   # drop NaN predictions
+    nonnegative=True
+)
+
+model = als.fit(training)
+
+predictions = model.transform(test)
+evaluator = RegressionEvaluator(metricName="rmse", labelCol="rating", predictionCol="prediction")
+rmse = evaluator.evaluate(predictions)
+print("Root-mean-square error = " + str(rmse))
+
+# recommend top 10 for all users (small output)
+userRecs = model.recommendForAllUsers(10)
+userRecs.show(5, truncate=False)
+
+# get recommendations for a specific user (id=1)
+from pyspark.sql import Row
+user1 = spark.createDataFrame([Row(userId=1)])
+recs_user1 = model.recommendForUserSubset(user1, 10)
+recs_user1.show(truncate=False)
+
+spark.stop()
+
+Notes:
+- Map movieId to titles using movies dataset and join on movieId.
+- Tune rank, regParam, and maxIter via cross-validation.
+
+-------------------------
+9) REDIS LEADERBOARD (Sorted Sets)
+-------------------------
+CLI examples
+hints:
+ZADD leaderboard 1000 "user:alice"
+ZADD leaderboard 1500 "user:bob"
+ZADD leaderboard 1200 "user:carol"
+ZREVRANGE leaderboard 0 2 WITHSCORES
+ZRANK leaderboard "user:alice"
+ZREVRANK leaderboard "user:alice"
+ZINCRBY leaderboard 50 "user:alice"
+ZREM leaderboard "user:carol"
+
+Python example using redis-py
+import redis
+r = redis.Redis(host='localhost', port=6379, db=0)
+r.zadd('leaderboard', {'user:alice': 1000, 'user:bob': 1500, 'user:carol': 1200})
+r.zincrby('leaderboard', 200, 'user:alice')
+top = r.zrevrange('leaderboard', 0, 9, withscores=True)
+print("Top players:", top)
+rank = r.zrank('leaderboard', 'user:alice')
+print("Alice rank (ascending):", rank)
+
+-------------------------
+10) MONGODB QUERY LANGUAGE (MQL)
+-------------------------
+Filtering and projection
+db.students.find({ dept: "CS", score: { $gte: 80 } }, { name: 1, score: 1, _id: 0 });
+db.students.find({ name: /^A/ });
+db.students.find({}).sort({ score: -1 }).limit(10);
+
+Aggregation examples
+db.students.aggregate([
+  { $group: { _id: "$dept", avgScore: { $avg: "$score" }, count: { $sum: 1 } } },
+  { $sort: { avgScore: -1 } }
+]);
+
+db.students.aggregate([
+  { $unwind: "$grades" },
+  { $group: { _id: "$name", maxGrade: { $max: "$grades" } } },
+  { $sort: { maxGrade: -1 } }
+]);
+
+db.students.aggregate([
+  { $match: { score: { $gte: 70 } } },
+  { $project: { name: 1, score: 1, passed: { $cond: [ { $gte: ["$score", 50] }, true, false ] } } },
+  { $limit: 10 }
+]);
+
+Updates and indexes
+db.students.updateOne({ name: "Alice" }, { $set: { score: 90 } });
+db.students.createIndex({ dept: 1, score: -1 });
+
+-------------------------
+End of file.
+-------------------------
+Notes about this text:
+- All code/configs are provided as templates. Paths (e.g., HDFS paths, $HADOOP_HOME) must be adapted to your environment.
+- For production-grade systems, add security, authentication, error handling, monitoring, and scaling practices.
